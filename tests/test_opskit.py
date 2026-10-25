@@ -46,6 +46,15 @@ def test_split_text():
     assert [len(p) for p in long] == [1000, 1000, 500]
 
 
+def test_brief():
+    assert telegram.brief("one") == "one"
+    assert telegram.brief("t\n\na\nb", lines=2) == "t\na\nb"  # blank lines dropped, nothing cut
+    assert telegram.brief("x" * 10, width=5) == "xxxx…"
+    out = telegram.brief("t\n" + "\n".join(f"l{i}" for i in range(9)), lines=3, log="logs/a.log")
+    assert out == "t\nl0\nl1\nl2\n… 외 6건 (로그: logs/a.log)", out
+    assert telegram.brief("t\na\nb\nc", lines=1).endswith("… 외 2건")
+
+
 class _Resp:
     status = 200
 

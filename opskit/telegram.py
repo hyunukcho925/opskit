@@ -28,6 +28,20 @@ def split_text(text, limit=LIMIT):
     return [c.rstrip("\n") for c in chunks if c.strip()]
 
 
+def brief(text, lines=8, width=120, log=None) -> str:
+    """Owner rule: Telegram says only what went wrong; details stay in logs.
+
+    Keeps the first line, then at most `lines` non-blank lines, each trimmed to `width`. When lines
+    are dropped, appends `… 외 K건` (plus ` (로그: <log>)` when log is given).
+    """
+    head, *rest = (text or "").splitlines() or [""]
+    rest = [r for r in rest if r.strip()]
+    out = [s if len(s) <= width else s[:width - 1] + "…" for s in [head] + rest[:lines]]
+    if len(rest) > lines:
+        out.append(f"… 외 {len(rest) - lines}건" + (f" (로그: {log})" if log else ""))
+    return "\n".join(out)
+
+
 def _post(token, payload, timeout):
     """-> (http_status, description). status 0 = request never got an HTTP answer."""
     data = urllib.parse.urlencode(payload).encode()
