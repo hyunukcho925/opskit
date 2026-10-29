@@ -96,6 +96,38 @@ def test_failure_returns_false_without_token_in_message():
     assert "403" in out and "SECRET" not in out
 
 
+def test_repeat_tag():
+    import datetime
+    with tempfile.TemporaryDirectory() as d:
+        f, day = str(Path(d) / "seen.json"), datetime.date(2026, 10, 27)
+        msg = lambda n: f"🚨 tistory 실패: exit 1 for 2026-10-{n}-farfetch-sale\nlog {n}"
+        assert telegram.repeat_tag(msg(13), day, f) == msg(13)
+        assert telegram.repeat_tag(msg(13), day, f) == msg(13)  # twice the same day is still day 1
+        assert telegram.repeat_tag(msg(14), day + datetime.timedelta(1), f).startswith("🔁 2일째 같은 알림\n🚨")
+        assert telegram.repeat_tag(msg(15), day + datetime.timedelta(2), f).startswith("🔁 3일째")
+        assert telegram.repeat_tag(msg(16), day + datetime.timedelta(4), f) == msg(16)  # gap resets the streak
+        assert telegram.repeat_tag("일일 리포트 2026-10-28", day, f) == "일일 리포트 2026-10-28"  # not an alert
+
+
+def test_sitecheck():
+    from opskit import sitecheck
+    index = "<sitemapindex><sitemap><loc>https://s.kr/sm/0.xml</loc></sitemap></sitemapindex>"
+    urls = "".join(f"<url><loc>https://s.kr/goods/{i}</loc></url>" for i in range(5)) + "<url><loc>https://s.kr</loc></url>"
+    pages = {"https://s.kr/sitemap.xml": (200, index), "https://s.kr/sm/0.xml": (200, urls), "https://s.kr/": (200, "")}
+    fake = lambda bad: lambda u, timeout=30: pages.get(u, (500 if bad else 200, ""))
+    with mock.patch.object(sitecheck, "get", fake(False)):
+        assert sitecheck.check("https://s.kr") == []
+    with mock.patch.object(sitecheck, "get", fake(True)):  # cached home 200, every product 500
+        assert len(sitecheck.check("https://s.kr")) == 3
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(sitecheck, "SITES", {"w": "https://s.kr"}), \
+            mock.patch.object(sitecheck, "STATE", Path(d) / "s.json"), mock.patch.object(sitecheck, "alert") as al:
+        for bad, sent in ((True, "🚨"), (True, None), (False, "✅"), (False, None)):
+            al.reset_mock()
+            with mock.patch.object(sitecheck, "check_retry", lambda b: ["500 x"] if bad else []):
+                sitecheck.watch()
+            assert (al.call_args[0][0][:1] if al.called else None) == sent
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -1,6 +1,8 @@
 """Telegram Bot API sendMessage over urllib. Stdlib only, never raises."""
+import datetime
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -8,6 +10,7 @@ import urllib.request
 
 API = "https://api.telegram.org/bot{}/sendMessage"
 LIMIT = 4000  # Telegram hard limit is 4096; leave room
+SEEN = os.path.join(os.environ.get("LOCALAPPDATA", "."), "opskit", "telegram-seen.json")
 
 
 def split_text(text, limit=LIMIT):
@@ -42,6 +45,40 @@ def brief(text, lines=8, width=120, log=None) -> str:
     return "\n".join(out)
 
 
+def repeat_tag(text, today=None, seen_file=None):
+    """An alert (first line starts with ⚠ or 🚨) sent again on consecutive days gets "🔁 N일째 같은 알림" on top.
+
+    Same alert = same first line with digits ignored (dates, counts and ids change daily). A daily repeat of one
+    failure reads as noise after day two (tistory 2026-10-27~29), so the streak is spelled out. Never raises.
+    """
+    head = (text or "").lstrip().split("\n", 1)[0]
+    if not head.startswith(("⚠", "🚨")):
+        return text
+    try:
+        f = seen_file or SEEN
+        today = today or datetime.date.today()
+        try:
+            with open(f, encoding="utf-8") as fh:
+                seen = json.load(fh)
+        except (OSError, ValueError):
+            seen = {}
+        key = re.sub(r"\d+", "#", head)[:200]
+        days = set(seen.get(key, [])) | {today.isoformat()}
+        n, d = 0, today
+        while d.isoformat() in days:
+            n, d = n + 1, d - datetime.timedelta(days=1)
+        seen[key] = sorted(days)[-14:]
+        cutoff = (today - datetime.timedelta(days=14)).isoformat()
+        seen = {k: v for k, v in seen.items() if v and v[-1] >= cutoff}
+        os.makedirs(os.path.dirname(f) or ".", exist_ok=True)
+        with open(f, "w", encoding="utf-8") as fh:
+            json.dump(seen, fh, ensure_ascii=False, indent=1)
+        return f"🔁 {n}일째 같은 알림\n{text}" if n >= 2 else text
+    except Exception as e:
+        print(f"[opskit.telegram] repeat_tag skipped: {type(e).__name__}", file=sys.stderr)
+        return text
+
+
 def _post(token, payload, timeout):
     """-> (http_status, description). status 0 = request never got an HTTP answer."""
     data = urllib.parse.urlencode(payload).encode()
@@ -70,7 +107,7 @@ def send(text, *, chat_id=None, token=None, parse_mode=None, timeout=20, silent=
     if not token or not chat_id:
         print("[opskit.telegram] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set - skipped", file=sys.stderr)
         return False
-    for part in split_text(text):
+    for part in split_text(repeat_tag(text)):
         payload = {"chat_id": chat_id, "text": part}
         if parse_mode:
             payload["parse_mode"] = parse_mode
