@@ -23,6 +23,11 @@ Transports, first match wins:
                              @ai-sdk/gateway 'evaluation-model' (protocol 0.0.1), which is NOT a documented HTTP API.
 Kill switch: JEV_DISABLED=1. Every failure returns None.
 
+engine="gemini" (opt-in per call site) asks Google gemini-decision-1 first (GEMINI_API_KEY, same noul/choice/score
+contract) and falls back to the Jev transports above when the key is missing or the call fails. Use it only where a
+real-data comparison showed Gemini judging better (C:\\dev\\JEV.md, 2026-11-13): same-product / entity questions.
+It was worse at following exception rules written into a question and at source-vs-text checks.
+
 Images (experimental, https://docs.typesafe.ai/images): pass `assets={ref: {"type": "image", "format": "jpg",
 "data_base64": ...}}` and put `ref` in the state. Sent only on the TYPESAFE_API_KEY transport — otherwise None.
 """
@@ -32,7 +37,9 @@ import urllib.request
 
 _TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 _GATEWAY_URL = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/decisions"
 _warned = False
+_gemini_warned = False
 
 
 def _post(url, headers, body, timeout):
@@ -64,6 +71,28 @@ def _via_typesafe(key, state, questions, timeout, assets=None):
     return answers
 
 
+def _via_gemini(key, state, questions, timeout):
+    # Decisions API: state goes in as JSON text; noul criteria use true_description/false_description.
+    wire = {}
+    for k, q in questions.items():
+        q = {**q, "type": "noul"} if q.get("type") == "boolean" else dict(q)
+        c = q.get("criteria")
+        if q["type"] == "noul" and isinstance(c, dict) and "true" in c:
+            q["criteria"] = {"true_description": c["true"], "false_description": c["false"]}
+        wire[k] = q
+    request = {"model": "gemini-decision-1",
+               "input": "State (JSON):\n" + json.dumps(state, ensure_ascii=False, indent=1), "questions": wire}
+    body = _post(_GEMINI_URL, {"x-goog-api-key": key}, request, timeout)
+    answers = body["answers"]
+    for answer in answers.values():
+        if answer.get("type") == "noul":
+            answer["type"] = "boolean"
+            answer["probability"] = answer.pop("noul")
+        else:
+            answer["confidence"] = float(answer.get("confidence") or 0.0)
+    return answers
+
+
 def _via_gateway(token, is_api_key, state, questions, timeout):
     body = _post(
         _GATEWAY_URL,
@@ -85,11 +114,19 @@ def _via_gateway(token, is_api_key, state, questions, timeout):
     return answers
 
 
-def evaluate(state, questions, timeout=8.0, assets=None):
+def evaluate(state, questions, timeout=8.0, assets=None, engine="jev"):
     """One request, all questions answered in parallel. Returns {question_id: answer} or None."""
-    global _warned
+    global _warned, _gemini_warned
     if os.environ.get("JEV_DISABLED") == "1":
         return None
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if engine == "gemini" and gemini_key and not assets:
+        try:
+            return _via_gemini(gemini_key, state, questions, timeout)
+        except Exception as e:  # noqa: BLE001 — fall through to Jev
+            if not _gemini_warned:
+                _gemini_warned = True
+                print(f"  [jev] gemini unavailable, trying Jev: {ascii(str(e)[:120])}")
     typesafe_key = os.environ.get("TYPESAFE_API_KEY")
     gateway_key = os.environ.get("AI_GATEWAY_API_KEY")
     gateway_token = gateway_key or os.environ.get("VERCEL_OIDC_TOKEN")
@@ -130,3 +167,10 @@ if __name__ == "__main__":
         assert live["accessory"]["type"] == "boolean" and 0.0 <= live["accessory"]["probability"] <= 1.0
         assert live["kind"]["choice"] in ("phone", "accessory") and "confidence" in live["kind"]
     print("fallback paths OK; live:", json.dumps(live, ensure_ascii=False) if live else "skipped/unavailable")
+    gem = evaluate({"title": "아이폰 17 프로 투명 케이스 맥세이프"},
+                   {"accessory": {"type": "boolean", "instructions": "Is `title` a listing for a phone accessory?",
+                                  "criteria": {"true": "a case, film or other accessory", "false": "a handset"}}},
+                   engine="gemini")
+    if gem:
+        assert gem["accessory"]["type"] == "boolean" and 0.0 <= gem["accessory"]["probability"] <= 1.0
+    print("gemini engine:", json.dumps(gem, ensure_ascii=False) if gem else "skipped/unavailable")
