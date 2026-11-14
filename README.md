@@ -2,6 +2,8 @@
 
 Shared helpers for the local Task Scheduler jobs under `C:\dev`.
 
+**Rule: bump `version` in `pyproject.toml` with every change.** CI runners reuse one venv per repo, and pip keeps an installed `opskit` whose version matches even when the git ref (`@main` or a commit hash) moved, so an unbumped change never reaches them (2026-11-14: coupang-crawler failed hourly on `engine=` for a day).
+
 **Rule: standard library only.** No third-party dependencies, ever — every job's interpreter must be able to import it.
 
 | Module | What it does |
